@@ -41,6 +41,63 @@
     }
 }
 
-$Computers = 'MAIN','ATS','Server1C','www.yandex.ru','hp1mux'
+function Send-NetMessage {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position=0, Mandatory=$true)]
+        [string]$Address,
+        [Parameter(ValueFromPipeline=$true)]
+        [string]$Message,
+        $ObjectNumber
+    )
+    
+    begin {
+        if ($Address -match '^(?<Address>[^:]+)(?::(?<Port>\d+))?$') {
+        }
+        else {
+            Write-Error 'Address is incorrect'
+            return
+        }
+        $AddressStr = $Matches.Address
+        $Port = [Int32]::Parse($Matches.Port)
+    }
+    process {
+        $client = New-Object System.Net.Sockets.TcpClient
+        $client.Connect($AddressStr, $Port)
+        #Write-Verbose "Sending '$Message' to $($client.Client.RemoteEndPoint)"
+        $bytes = [System.Text.Encoding]::ASCII.GetBytes($Message)
+        $client.Client.Send($bytes)
+        $client.Close()
+    }
+    end {
+    }
+}
 
-Ping-Computer $Computers -Count 0 -Delay 10 | ?{ $_.Status -ne $true } | select -ExpandProperty Computer
+#$Computers = 'MAIN','ATS','Server1C','www.yandex.ru','hp1mux'
+$Computers = '10.34.0.72','10.34.0.73','10.34.0.75'
+$SendTo = '188.247.38.178:3056'
+$VerbosePreference = 'Continue'
+
+Ping-Computer $Computers -Count 0 -Delay 10 -PipelineVariable Ping | %{
+    $CompStats = $Stats[$Ping.Computer]
+    if ($CompStats -eq $null) {
+        $CompStats = [PSCustomObject]@{Computer=$Ping.Computer; Status=$null; Begin=(Get-Date)}
+        $Stats[$Ping.Computer] = $CompStats
+    }
+    if ($Ping.Status -ne $CompStats.Status) {
+        if ($Ping.Status) {
+            Write-Verbose "$($Ping.Computer) доступен"
+        }
+        else {
+            Write-Warning "$($Ping.Computer) не доступен"
+        }
+    }
+    if (-not $Ping.Status) {
+        $Zone = 1
+        $Message = '501118{0:D4}E1300100{1:D1}' -f $ObjectNumber,$Zone
+        Write-Verbose "$(Get-Date): $ComputerName is unavailable (Message: $Message)"
+        Send-NetMessage -Message $Message -Address $SendTo
+    }
+} -Begin {
+    $Stats = @{}
+}
