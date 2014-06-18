@@ -42,7 +42,7 @@
 }
 
 function Send-NetMessage {
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess=$true)]
     param(
         [Parameter(Position=0, Mandatory=$true)]
         [string]$Address,
@@ -62,42 +62,61 @@ function Send-NetMessage {
         $Port = [Int32]::Parse($Matches.Port)
     }
     process {
-        $client = New-Object System.Net.Sockets.TcpClient
-        $client.Connect($AddressStr, $Port)
-        #Write-Verbose "Sending '$Message' to $($client.Client.RemoteEndPoint)"
-        $bytes = [System.Text.Encoding]::ASCII.GetBytes($Message)
-        $client.Client.Send($bytes)
-        $client.Close()
+        if ($PSCmdlet.ShouldProcess("$Message => $Address")) {
+            $client = New-Object System.Net.Sockets.TcpClient
+            $client.Connect($AddressStr, $Port)
+            $bytes = [System.Text.Encoding]::ASCII.GetBytes($Message)
+            $client.Client.Send($bytes)
+            $client.Close()
+        }
     }
     end {
     }
 }
 
 #$Computers = 'MAIN','ATS','Server1C','www.yandex.ru','hp1mux'
-$Computers = '10.34.0.72','10.34.0.73','10.34.0.75'
+$Computers = '10.34.0.72','10.34.0.73','10.34.0.75','10.34.0.77'
 $SendTo = '188.247.38.178:3056'
 $VerbosePreference = 'Continue'
 
 Ping-Computer $Computers -Count 0 -Delay 10 -PipelineVariable Ping | %{
     $CompStats = $Stats[$Ping.Computer]
     if ($CompStats -eq $null) {
-        $CompStats = [PSCustomObject]@{Computer=$Ping.Computer; Status=$null; Begin=(Get-Date)}
+        $CompStats = [PSCustomObject]@{Computer=$Ping.Computer; Status=$null; Begin=$null}
         $Stats[$Ping.Computer] = $CompStats
     }
-    if ($Ping.Status -ne $CompStats.Status) {
-        if ($Ping.Status) {
-            Write-Verbose "$($Ping.Computer) доступен"
+    if ($Ping.Status -eq $CompStats.Status) {
+        if ($CompStats.Begin -eq $null) {
+            $begin = 'момента запуска'
+            $span = (Get-Date) - $StartTime
         }
         else {
-            Write-Warning "$($Ping.Computer) не доступен"
+            $begin = '{0}' -f $CompStats.Begin
+            $span = (Get-Date) - $CompStats.Begin
         }
+        $span = New-Object TimeSpan -ArgumentList $span.Days,$span.Hours,$span.Minutes,$span.Seconds
+        $add = ' с {0} ({1:c})' -f $begin,$span
     }
+    else {
+        if ($CompStats.Status -ne $null) {
+            $CompStats.Begin = Get-Date
+        }
+        $CompStats.Status = $Ping.Status
+        $add = ''
+    }
+    if ($Ping.Status) {
+        Write-Verbose "$($Ping.Computer) доступен$add"
+    }
+    else {
+        Write-Warning "$($Ping.Computer) не отвечает$add"
+    }
+
     if (-not $Ping.Status) {
         $Zone = 1
         $Message = '501118{0:D4}E1300100{1:D1}' -f $ObjectNumber,$Zone
-        Write-Verbose "$(Get-Date): $ComputerName is unavailable (Message: $Message)"
-        Send-NetMessage -Message $Message -Address $SendTo
+        Send-NetMessage -Message $Message -Address $SendTo -WhatIf
     }
 } -Begin {
+    $StartTime = Get-Date
     $Stats = @{}
 }
