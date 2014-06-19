@@ -63,10 +63,26 @@ function Send-NetMessage {
     }
     process {
         if ($PSCmdlet.ShouldProcess("$Message => $Address")) {
-            $client = New-Object System.Net.Sockets.TcpClient
+            $client = New-Object System.Net.Sockets.Socket -ArgumentList 'InterNetwork','Stream','Tcp'
             $client.Connect($AddressStr, $Port)
-            $bytes = [System.Text.Encoding]::ASCII.GetBytes($Message)
-            $client.Client.Send($bytes)
+            $client.NoDelay = $true
+            $client.ReceiveTimeout = 4000
+            $bytes = [System.Text.Encoding]::ASCII.GetBytes("$Message`r")
+            Write-Verbose "Отправка '$Message' => $($client.RemoteEndpoint)"
+            $client.Send($bytes) | Out-Null
+            $bytesReceived = $client.Receive($bytes)
+            if ($bytesReceived) {
+                $sb = New-Object System.Text.StringBuilder
+                $sb.Append("В ответ получено $bytesReceived байт") | Out-Null
+                $sb.Append(':') | Out-Null
+                for ($i = 0; $i -lt $bytesReceived; $i++) {
+                    $sb.AppendFormat(' {0:X2}', $bytes[$i]) | Out-Null
+                }
+                Write-Verbose $sb
+            }
+            else {
+                Write-Verbose 'Ответ не получен'
+            }
             $client.Close()
         }
     }
@@ -74,12 +90,17 @@ function Send-NetMessage {
     }
 }
 
-#$Computers = 'MAIN','ATS','Server1C','www.yandex.ru','hp1mux'
-$Computers = '10.34.0.72','10.34.0.73','10.34.0.75','10.34.0.77'
-$SendTo = '188.247.38.178:3056'
+$Computers = @{
+    '10.34.0.72' = 1;
+    '10.34.0.73' = 2;
+    '10.34.0.75' = 3;
+    '10.34.0.77' = 4
+}
+$SendTo = '10.34.0.25:10030'
+$ObjectNumber = 9999
 $VerbosePreference = 'Continue'
 
-Ping-Computer $Computers -Count 0 -Delay 10 -PipelineVariable Ping | %{
+Ping-Computer $Computers.Keys -Count 0 -Delay 10 -PipelineVariable Ping | %{
     $CompStats = $Stats[$Ping.Computer]
     if ($CompStats -eq $null) {
         $CompStats = [PSCustomObject]@{Computer=$Ping.Computer; Status=$null; Begin=$null}
@@ -105,16 +126,16 @@ Ping-Computer $Computers -Count 0 -Delay 10 -PipelineVariable Ping | %{
         $add = ''
     }
     if ($Ping.Status) {
-        Write-Verbose "$($Ping.Computer) доступен$add"
+        Write-Verbose "$($Ping.Computer) доступен$add, пинг $($Ping.Time) мс"
     }
     else {
         Write-Warning "$($Ping.Computer) не отвечает$add"
     }
 
     if (-not $Ping.Status) {
-        $Zone = 1
-        $Message = '501118{0:D4}E1300100{1:D1}' -f $ObjectNumber,$Zone
-        Send-NetMessage -Message $Message -Address $SendTo -WhatIf
+        $Zone = $Computers[$Ping.Computer]
+        $Message = '5011 18{0:D4}E13001{1:D3}' -f $ObjectNumber,$Zone
+        Send-NetMessage -Message $Message -Address $SendTo
     }
 } -Begin {
     $StartTime = Get-Date
