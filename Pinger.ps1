@@ -41,18 +41,46 @@
     }
 }
 
-function Send-NetMessage {
+function Send-ShurgardMessage {
     [CmdletBinding(SupportsShouldProcess=$true)]
     param(
-        [Parameter(Position=0, Mandatory=$true)]
+        # Адрес получателя в формате <адрес>[:<порт>]
+        [Parameter(Position=0, Mandatory=$true, ValueFromPipelineByPropertyName=$true)]
+        [ValidatePattern('[^:]+(:\d+)?')]
         [string]$Address,
-        [Parameter(ValueFromPipeline=$true)]
-        [string]$Message,
-        $ObjectNumber
+
+        # Номер приемника
+        [Parameter(ValueFromPipelineByPropertyName=$true)]
+        [ValidateRange(0, 9)]
+        [int]$Receiver = 1,
+        # Номер линии
+        [Parameter(ValueFromPipelineByPropertyName=$true)]
+        [ValidateRange(0, 99)]
+        [int]$Line = 1,
+        # Номер объекта
+        [Parameter(ValueFromPipelineByPropertyName=$true)]
+        [ValidateRange(0, 9999)]
+        [int]$Object,
+        # Код события
+        [Parameter(ValueFromPipelineByPropertyName=$true)]
+        [ValidatePattern('[E|R]\d{3}')]
+        [string]$Event,
+        # Номер раздела (шлейфа)
+        [Parameter(ValueFromPipelineByPropertyName=$true)]
+        [ValidateRange(0, 99)]
+        [int]$Part,
+        # Номер зоны
+        [Parameter(ValueFromPipelineByPropertyName=$true)]
+        [ValidateRange(0, 999)]
+        [int]$Zone,
+
+        # Тест
+        [Parameter(ValueFromPipelineByPropertyName=$true)]
+        [switch]$Test
     )
     
     begin {
-        if ($Address -match '^(?<Address>[^:]+)(?::(?<Port>\d+))?$') {
+        if ($Address -match '(?<Address>[^:]+)(?::(?<Port>\d+))?') {
         }
         else {
             Write-Error 'Address is incorrect'
@@ -60,44 +88,53 @@ function Send-NetMessage {
         }
         $AddressStr = $Matches.Address
         $Port = [Int32]::Parse($Matches.Port)
+        $Socket = New-Object System.Net.Sockets.Socket -ArgumentList 'InterNetwork','Stream','Tcp'
+        $Socket.Connect($AddressStr, $Port)
+        Write-Verbose "Connected to $($Socket.RemoteEndpoint)"
+        $Socket.NoDelay = $true
+        $Socket.ReceiveTimeout = 5000
+        [char]$EOL = 0x14
+        [byte]$AnswerOK = 0x06
+        [byte]$AnswerFail = 0x15
+        #Не реже, чем раз в 30 сек. нужно что-нибудь отправлять (сообщение или тест)
     }
     process {
-        if ($PSCmdlet.ShouldProcess("$Message => $Address")) {
-            $client = New-Object System.Net.Sockets.Socket -ArgumentList 'InterNetwork','Stream','Tcp'
-            $client.Connect($AddressStr, $Port)
-            $client.NoDelay = $true
-            $client.ReceiveTimeout = 4000
-            $bytes = [System.Text.Encoding]::ASCII.GetBytes("$Message`r")
-            Write-Verbose "Отправка '$Message' => $($client.RemoteEndpoint)"
-            $client.Send($bytes) | Out-Null
-            $bytesReceived = $client.Receive($bytes)
-            if ($bytesReceived) {
+        if ($Test) {
+            $Message = '1011           @    '
+        }
+        else {
+            $Message = '5{0:D2}{1} 18{2:D4}{3}{4:D2}{5:D3}' -f $Receiver,$Line,$Object,$Event,$Part,$Zone
+        }
+        if ($PSCmdlet.ShouldProcess($Message)) {
+            $Bytes = [System.Text.Encoding]::ASCII.GetBytes("$Message$EOL")
+            Write-Verbose "Отправка '$Message'"
+            $Socket.Send($bytes) | Out-Null
+            $BytesReceived = $Socket.Receive($Bytes)
+            if ($BytesReceived) {
                 $sb = New-Object System.Text.StringBuilder
-                $sb.Append("В ответ получено $bytesReceived байт") | Out-Null
+                $sb.Append("В ответ получено $BytesReceived байт") | Out-Null
                 $sb.Append(':') | Out-Null
-                for ($i = 0; $i -lt $bytesReceived; $i++) {
-                    $sb.AppendFormat(' {0:X2}', $bytes[$i]) | Out-Null
+                for ($i = 0; $i -lt $BytesReceived; $i++) {
+                    $sb.AppendFormat(' {0:X2}', $Bytes[$i]) | Out-Null
                 }
                 Write-Verbose $sb
             }
             else {
                 Write-Verbose 'Ответ не получен'
             }
-            $client.Close()
         }
     }
     end {
+        $Socket.Close()
     }
 }
 
 $Computers = @{
-    '10.34.0.72' = 1;
-    '10.34.0.73' = 2;
-    '10.34.0.75' = 3;
-    '10.34.0.77' = 4
+    '10.34.0.72' = 2;
+    '10.34.0.73' = 3;
+    '10.34.0.75' = 5;
+    '10.34.0.77' = 7;
 }
-$SendTo = '10.34.0.25:10030'
-$ObjectNumber = 9999
 $VerbosePreference = 'Continue'
 
 Ping-Computer $Computers.Keys -Count 0 -Delay 10 -PipelineVariable Ping | %{
@@ -108,15 +145,15 @@ Ping-Computer $Computers.Keys -Count 0 -Delay 10 -PipelineVariable Ping | %{
     }
     if ($Ping.Status -eq $CompStats.Status) {
         if ($CompStats.Begin -eq $null) {
-            $begin = 'момента запуска'
-            $span = (Get-Date) - $StartTime
+            $Begin = 'момента запуска'
+            $Span = (Get-Date) - $StartTime
         }
         else {
-            $begin = '{0}' -f $CompStats.Begin
-            $span = (Get-Date) - $CompStats.Begin
+            $Begin = '{0}' -f $CompStats.Begin
+            $Span = (Get-Date) - $CompStats.Begin
         }
-        $span = New-Object TimeSpan -ArgumentList $span.Days,$span.Hours,$span.Minutes,$span.Seconds
-        $add = ' с {0} ({1:c})' -f $begin,$span
+        $Span = New-Object TimeSpan -ArgumentList $Span.Days,$Span.Hours,$Span.Minutes,$Span.Seconds
+        $add = ' с {0} ({1:c})' -f $Begin,$Span
     }
     else {
         if ($CompStats.Status -ne $null) {
@@ -133,11 +170,13 @@ Ping-Computer $Computers.Keys -Count 0 -Delay 10 -PipelineVariable Ping | %{
     }
 
     if (-not $Ping.Status) {
-        $Zone = $Computers[$Ping.Computer]
-        $Message = '5011 18{0:D4}E13001{1:D3}' -f $ObjectNumber,$Zone
-        Send-NetMessage -Message $Message -Address $SendTo
+        $data = [PSCustomObject]@{ Zone = $Computers[$Ping.Computer] }
+        Write-Output $data
+    }
+    else {
+        $data = [PSCustomObject]@{ Test = $true }
     }
 } -Begin {
     $StartTime = Get-Date
     $Stats = @{}
-}
+} | Send-ShurgardMessage -Address '10.78.100.34:10014' -Object 9999 -Part 1 -Event E130
