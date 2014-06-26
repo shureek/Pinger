@@ -1,36 +1,32 @@
-﻿[CmdletBinding()]
-param(
-    # Компьютеры и соответствующие им номера зон
-    [Parameter(Mandatory=$true)]
-    [Hashtable]$Computers,
-
-    # Адрес получателя в формате <адрес>[:<порт>]
-    [Parameter(Position=0, Mandatory=$true, ValueFromPipelineByPropertyName=$true)]
-    [ValidatePattern('[^:]+(:\d+)?')]
-    [string]$SendTo,
-
-    # Номер объекта в сработке
-    [Parameter(Mandatory=$true)]
-    [ValidateRange(0, 9999)]
-    [int]$ObjectNumber,
-
-    # Номер раздела (шлейфа) в сработке
-    [ValidateRange(0, 99)]
-    [int]$Part = 1,
-
-    # Код события в сработке
-    [Parameter(Mandatory=$true)]
-    [ValidatePattern('[E|R]\d{3}')]
-    [string]$EventCode
-)
-
+﻿<#
+.Synopsis
+   Пингует указанные компьютеры
+.Description
+   Пингует указанные компьютеры и выдает результат в виде объекта PingStatus
+.Example
+   Ping-Computer SERVER
+.Example
+   Ping-Computer SERVER1,SERVER2 -Count 0 -Delay 10
+.Outputs
+   PingStatus
+.Notes
+   В отличие от Test-Connection, при отсутствии пинга этот командлет не генерирует ошибку, а возвращает объект PingStatus со статусом $false
+#>
 function Ping-Computer {
     [CmdletBinding()]
     param(
+        # Имя или адрес компьютера
+        [Parameter(Mandatory=$true, Position=0)]
         [string[]]$ComputerName,
+        # Количество пингов (0 — бесконечно)
         [int]$Count = 4,
+        # Задержка между пингами
         [int]$Delay = 1
     )
+    
+    # Начальные данные для формирования статистики
+    $StartTime = Get-Date
+    $Stats = @{}
     
     #If Count <= 0 we'll make endless loop
     if ($Count -le 0) {
@@ -56,22 +52,69 @@ function Ping-Computer {
             $PingError.Clear()
         }
     } | %{
+        # Формируем объект PingStatus
         if ($_ -is [System.Management.Automation.ErrorRecord]) {
-            $obj = [PSCustomObject]@{Computer=$_.TargetObject; Address=$null; Status=$false; Time=$null}
+            $PingStatus = [PSCustomObject]@{Computer=$_.TargetObject; Address=$null; Status=$false; Time=$null}
         }
         else {
-            $obj = [PSCustomObject]@{Computer=$_.Address; Address=$_.ProtocolAddress; Status=$true; Time=$_.ResponseTime}
+            $PingStatus = [PSCustomObject]@{Computer=$_.Address; Address=$_.ProtocolAddress; Status=$true; Time=$_.ResponseTime}
         }
-        $obj.PSObject.TypeNames.Insert(0, 'PingStatus')
-        $obj
+        $PingStatus.PSObject.TypeNames.Insert(0, 'PingStatus')
+        
+        # Формируем статистику
+        $CompStats = $Stats[$PingStatus.Computer]
+        if ($CompStats -eq $null) {
+            $CompStats = [PSCustomObject]@{Computer=$PingStatus.Computer; Status=$null; Begin=$null}
+            $Stats[$PingStatus.Computer] = $CompStats
+        }
+
+        if ($PingStatus.Status -eq $CompStats.Status) {
+            if ($CompStats.Begin -eq $null) {
+                $Begin = 'момента запуска'
+                $Span = (Get-Date) - $StartTime
+            }
+            else {
+                $Begin = '{0}' -f $CompStats.Begin
+                $Span = (Get-Date) - $CompStats.Begin
+            }
+            $Span = New-Object TimeSpan -ArgumentList $Span.Days,$Span.Hours,$Span.Minutes,$Span.Seconds
+            $add = ' с {0} ({1:c})' -f $Begin,$Span
+        }
+        else {
+            if ($CompStats.Status -ne $null) {
+                $CompStats.Begin = Get-Date
+            }
+            $CompStats.Status = $PingStatus.Status
+            $add = ''
+        }
+        if ($PingStatus.Status) {
+            Write-Verbose "$($PingStatus.Computer) доступен$add, пинг $($PingStatus.Time) мс"
+        }
+        else {
+            Write-Warning "$($PingStatus.Computer) не отвечает$add"
+        }
+
+        $PingStatus
     }
 }
 
-function Send-ShurgardMessage {
+<#
+.Synopsis
+   Отправляет сообщение в формате Surgard
+.Description
+   Формирует и отправляет по tcp на указанный адрес и порт сообщение в формате Surgard
+.Example
+   Send-SurgardMessage -Address SERVER:10000 -Object 100 -Event R130 -Part 2 -Zone 4
+.Example
+   [PSCustomObject]@{ Object=1; Event='E130'; Part = 1; Zone = 1 } | Send-SurgardMessage SERVER:10000 -Receiver 1 -Line 1
+.Inputs
+   ObjectEvent
+#>
+function Send-SurgardMessage {
     [CmdletBinding(SupportsShouldProcess=$true)]
     param(
         # Адрес получателя в формате <адрес>[:<порт>]
-        [Parameter(Position=0, Mandatory=$true, ValueFromPipelineByPropertyName=$true)]
+        [Parameter(Position=0, Mandatory=$true)]
         [ValidatePattern('[^:]+(:\d+)?')]
         [string]$Address,
 
@@ -94,11 +137,11 @@ function Send-ShurgardMessage {
         # Номер раздела (шлейфа)
         [Parameter(ValueFromPipelineByPropertyName=$true)]
         [ValidateRange(0, 99)]
-        [int]$Part,
+        [int]$Part = 1,
         # Номер зоны
         [Parameter(ValueFromPipelineByPropertyName=$true)]
         [ValidateRange(0, 999)]
-        [int]$Zone,
+        [int]$Zone = 1,
 
         # Тест
         [Parameter(ValueFromPipelineByPropertyName=$true)]
@@ -165,7 +208,7 @@ function Send-ShurgardMessage {
                 Write-Verbose $sb
             }
             elseif (-not $Test) {
-                Write-Warning 'Ответ не получен'
+                Write-Warning 'От приемника не получено подтверждение о доставке сообщения'
             }
         }
     }
@@ -173,55 +216,3 @@ function Send-ShurgardMessage {
         $Socket.Close()
     }
 }
-
-function ConvertTo-ObjectEvent {
-    [CmdletBinding()]
-    param(
-        [Parameter(Position=0, Mandatory=$true, ValueFromPipeline=$true)]
-        $PingStatus
-    )
-}
-
-Ping-Computer $Computers.Keys -Count 0 -Delay 10 -PipelineVariable Ping | %{
-    $CompStats = $Stats[$Ping.Computer]
-    if ($CompStats -eq $null) {
-        $CompStats = [PSCustomObject]@{Computer=$Ping.Computer; Status=$null; Begin=$null}
-        $Stats[$Ping.Computer] = $CompStats
-    }
-    if ($Ping.Status -eq $CompStats.Status) {
-        if ($CompStats.Begin -eq $null) {
-            $Begin = 'момента запуска'
-            $Span = (Get-Date) - $StartTime
-        }
-        else {
-            $Begin = '{0}' -f $CompStats.Begin
-            $Span = (Get-Date) - $CompStats.Begin
-        }
-        $Span = New-Object TimeSpan -ArgumentList $Span.Days,$Span.Hours,$Span.Minutes,$Span.Seconds
-        $add = ' с {0} ({1:c})' -f $Begin,$Span
-    }
-    else {
-        if ($CompStats.Status -ne $null) {
-            $CompStats.Begin = Get-Date
-        }
-        $CompStats.Status = $Ping.Status
-        $add = ''
-    }
-    if ($Ping.Status) {
-        Write-Verbose "$($Ping.Computer) доступен$add, пинг $($Ping.Time) мс"
-    }
-    else {
-        Write-Warning "$($Ping.Computer) не отвечает$add"
-    }
-
-    if (-not $Ping.Status) {
-        $data = [PSCustomObject]@{ Zone = $Computers[$Ping.Computer] }
-    }
-    else {
-        $data = [PSCustomObject]@{ Test = $true }
-    }
-    Write-Output $data
-} -Begin {
-    $StartTime = Get-Date
-    $Stats = @{}
-} | Send-ShurgardMessage -Address $SendTo -Object $ObjectNumber -Part $Part -Event $EventCode
