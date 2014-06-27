@@ -28,7 +28,6 @@ function Ping-Computer {
     $StartTime = Get-Date
     $Stats = @{}
     
-    #If Count <= 0 we'll make endless loop
     if ($Count -le 0) {
         $CountInt = 100
     }
@@ -39,7 +38,7 @@ function Ping-Computer {
     0 | %{
         do {
             Test-Connection -ComputerName $ComputerName -Count $CountInt -Delay $Delay -ErrorAction SilentlyContinue -ErrorVariable PingError
-        } while($Count -le 0)
+        } while($Count -le 0) # при $Count ≤ 0 будет бесконечный цикл
     } | %{
         $_
         if ($PingError.Count -gt 0) {
@@ -216,3 +215,21 @@ function Send-SurgardMessage {
         $Socket.Close()
     }
 }
+
+# Начало основной программы
+$Computers = Get-Content '.\Ping computers.txt' | ?{ $_ -match '(?<Name>.+)\s*=\s*(?<Value>\d+)' } | %{ $Hashtable[$Matches.Name] = $Matches.Value } -Begin { $Hashtable = @{} } -End { $Hashtable }
+Ping-Computer $Computers.Keys -Count 0 -Delay 10 -Verbose <#| %{
+    if ($_.Status) {
+        [PSCustomObject]@{
+            Test = $True
+        }
+    }
+    else {
+        [PSCustomObject]@{
+            Object = 9999;
+            Event = 'E130';
+            Part = 1;
+            Zone = $Computers[$_.Computer];
+        }
+    }
+} | Send-SurgardMessage -Address 10.34.0.25:10030 #>

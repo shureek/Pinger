@@ -21,4 +21,4 @@ Ping-Computer $Computers.Keys -Count 0 -Delay 10 -Verbose | %{
             Zone = $Computers[$_.Computer];
         }
     }
-} | Send-ShurgardMessage -Address 10.34.0.25:10030
+} | Send-SurgardMessage -Address 10.34.0.25:10030
