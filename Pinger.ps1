@@ -1,5 +1,58 @@
 ﻿<#
 .Synopsis
+    Пингует указанные компьютеры и отправляет тревожные сообщения на приемник по TCP
+.Notes
+    Создал Александр Кузин
+    Версия 1.1 от 27.06.2014
+    Файл подписан цифровой подписью. При малейшем изменении он перестанет запускаться.
+#>
+[CmdletBinding(DefaultParameterSetName='FileName', SupportsShouldProcess=$true)]
+param(
+    # Адрес приемника в формате <адрес>[:<порт>]
+    [Parameter(Position=0)]
+    [ValidatePattern('[^:]+(:\d+)?')]
+    [string]$SendTo = '10.34.0.25:10030',
+    
+    # Соответствие компьютеров и номеров зон
+    [Parameter(Mandatory=$true, ParameterSetName='Computers')]
+    [Hashtable]$Computers,
+
+    # Имя файла со списком компьютеров и номерами зон
+    # Текстовый файл со строками вида:
+    #  Server1 = 1
+    #  10.34.0.1 = 2
+    #  www.yandex.ru = 3
+    [Parameter(ParameterSetName='FileName')]
+    [string]$FileName = 'Ping computers.txt',
+
+    # Номер приемника
+    [Parameter(ValueFromPipelineByPropertyName=$true)]
+    [ValidateRange(0, 9)]
+    [int]$ReceiverNo = 1,
+
+    # Номер линии
+    [Parameter(ValueFromPipelineByPropertyName=$true)]
+    [ValidateRange(0, 99)]
+    [int]$LineNo = 1,
+
+    # Номер объекта
+    [Parameter(ValueFromPipelineByPropertyName=$true)]
+    [ValidateRange(0, 9999)]
+    [int]$ObjectNumber = 9999,
+
+    # Код события
+    [Parameter(ValueFromPipelineByPropertyName=$true)]
+    [ValidatePattern('[E|R]\d{3}')]
+    [string]$EventCode = 'E130',
+
+    # Номер раздела (шлейфа)
+    [Parameter(ValueFromPipelineByPropertyName=$true)]
+    [ValidateRange(0, 99)]
+    [int]$Part = 1
+)
+
+<#
+.Synopsis
    Пингует указанные компьютеры
 .Description
    Пингует указанные компьютеры и выдает результат в виде объекта PingStatus
@@ -112,7 +165,7 @@ function Ping-Computer {
 function Send-SurgardMessage {
     [CmdletBinding(SupportsShouldProcess=$true)]
     param(
-        # Адрес получателя в формате <адрес>[:<порт>]
+        # Адрес приемника в формате <адрес>[:<порт>]
         [Parameter(Position=0, Mandatory=$true)]
         [ValidatePattern('[^:]+(:\d+)?')]
         [string]$Address,
@@ -177,7 +230,7 @@ function Send-SurgardMessage {
         else {
             $Message = '5{0:D2}{1} 18{2:D4}{3}{4:D2}{5:D3}' -f $Receiver,$Line,$Object,$Event,$Part,$Zone
         }
-        if ($PSCmdlet.ShouldProcess($Message)) {
+        if ($PSCmdlet.ShouldProcess($Message, 'Отправка сообщения')) {
             $BytesCount = [System.Text.Encoding]::ASCII.GetBytes($Message, 0, $Message.Length, $Buffer, 0)
             $Buffer[$BytesCount] = $EOL
             $BytesCount++
@@ -217,8 +270,18 @@ function Send-SurgardMessage {
 }
 
 # Начало основной программы
-$Computers = Get-Content '.\Ping computers.txt' | ?{ $_ -match '(?<Name>.+)\s*=\s*(?<Value>\d+)' } | %{ $Hashtable[$Matches.Name] = $Matches.Value } -Begin { $Hashtable = @{} } -End { $Hashtable }
-Ping-Computer $Computers.Keys -Count 0 -Delay 10 -Verbose <#| %{
+if ($PSCmdlet.ParameterSetName -eq 'FileName') {
+    $FullFileName = $FileName
+    if (-not (Test-Path $FullFileName)) {
+        # Если не нашли файл, то попробуем поискать в папке со скриптом
+        if (-not [System.IO.Path]::IsPathRooted($FileName)) {
+            $ScriptPath = Split-Path $PSCommandPath -Parent
+            $FullFileName = Join-Path $ScriptPath $FileName
+        }
+    }
+    $Computers = Get-Content $FullFileName | ?{ $_ -match '(?<Name>[^\s=]+)\s*=\s*(?<Value>\d+)' } | %{ $Hashtable[$Matches.Name] = [int]$Matches.Value } -Begin { $Hashtable = @{} } -End { $Hashtable }
+}
+Ping-Computer $Computers.Keys -Count 0 -Delay 10 -Verbose | %{
     if ($_.Status) {
         [PSCustomObject]@{
             Test = $True
@@ -226,10 +289,10 @@ Ping-Computer $Computers.Keys -Count 0 -Delay 10 -Verbose <#| %{
     }
     else {
         [PSCustomObject]@{
-            Object = 9999;
-            Event = 'E130';
-            Part = 1;
+            Object = $ObjectNumber;
+            Event = $EventCode;
+            Part = $Part;
             Zone = $Computers[$_.Computer];
         }
     }
-} | Send-SurgardMessage -Address 10.34.0.25:10030 #>
+} | Send-SurgardMessage -Address $SendTo -Receiver $ReceiverNo -Line $LineNo
