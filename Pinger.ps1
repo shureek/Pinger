@@ -3,7 +3,7 @@
     Пингует указанные компьютеры и отправляет тревожные сообщения на приемник по TCP
 .Notes
     Создал Александр Кузин
-    Версия 1.1 от 27.06.2014
+    Версия 1.2 от 14.07.2014
     Файл подписан цифровой подписью. При малейшем изменении он перестанет запускаться.
 #>
 [CmdletBinding(DefaultParameterSetName='FileName', SupportsShouldProcess=$true)]
@@ -209,14 +209,6 @@ function Send-SurgardMessage {
         }
         $AddressStr = $Matches.Address
         $Port = [Int32]::Parse($Matches.Port)
-        $Socket = New-Object System.Net.Sockets.Socket -ArgumentList 'InterNetwork','Stream','Tcp'
-        $Socket.Connect($AddressStr, $Port)
-        if (-not $Socket.Connected) {
-            Write-Error 'Не удалось подключиться к получателю' -Category ConnectionError -TargetObject $Address
-        }
-        Write-Verbose "Connected to $($Socket.RemoteEndpoint)"
-        $Socket.NoDelay = $true
-        $Socket.ReceiveTimeout = 5000
         [byte]$EOL = 0x14
         [byte]$AnswerOK = 0x06
         [byte]$AnswerFail = 0x15
@@ -234,11 +226,35 @@ function Send-SurgardMessage {
             $BytesCount = [System.Text.Encoding]::ASCII.GetBytes($Message, 0, $Message.Length, $Buffer, 0)
             $Buffer[$BytesCount] = $EOL
             $BytesCount++
-            $SentCount = $Socket.Send($Buffer, 0, $BytesCount, 'None')
-            if ($SentCount -ne $BytesCount) {
+
+            if ($Socket -eq $null -or -not $Socket.Connected) {
+                if ($Socket -ne $null) {
+                    $Socket.Close()
+                }
+                $Socket = New-Object System.Net.Sockets.Socket -ArgumentList 'InterNetwork','Stream','Tcp'
+                $Socket.Connect($AddressStr, $Port)
+                if (-not $Socket.Connected) {
+                    Write-Error 'Не удалось подключиться к получателю' -Category ConnectionError -TargetObject $Address
+                    return
+                }
+                Write-Verbose "Подключились к $($Socket.RemoteEndpoint)"
+                $Socket.NoDelay = $true
+                $Socket.ReceiveTimeout = 5000
+            }
+
+            [System.Net.Sockets.SocketError]$SocketError = 0
+            $SentCount = $Socket.Send($Buffer, 0, $BytesCount, 'None', [Ref]$SocketError)
+            if ($SocketError -ne 'Success') {
+                $ErrorCategory = [System.Management.Automation.ErrorCategory]::ConnectionError
+                if ($SocketError -eq 'TimedOut') {
+                    $ErrorCategory = [System.Management.Automation.ErrorCategory]::OperationTimeout
+                }
+                Write-Error "Ошибка отправки сообщения: $SocketError" -Category $ErrorCategory
+                return
+            }
+            elseif ($SentCount -ne $BytesCount) {
                 Write-Error "Отправлено $SentCount байт вместо $BytesCount" -Category InvalidResult
             }
-            [System.Net.Sockets.SocketError]$SocketError = 0
             $ReceivedCount = $Socket.Receive($Buffer, 0, $Buffer.Length, 'None', [Ref]$SocketError)
             if ($SocketError -ne 'Success' -and $SocketError -ne 'TimedOut') {
                 Write-Error "Ошибка получения ответа от получателя: $SocketError" -Category ConnectionError
@@ -251,8 +267,7 @@ function Send-SurgardMessage {
             }
             elseif ($ReceivedCount) {
                 $sb = New-Object System.Text.StringBuilder
-                $sb.Append("В ответ получено $ReceivedCount байт") | Out-Null
-                $sb.Append(':') | Out-Null
+                $sb.AppendFormat("В ответ получено {0} байт:", $ReceivedCount) | Out-Null
                 for ($i = 0; $i -lt $ReceivedCount; $i++) {
                     $sb.AppendFormat(' {0:X2}', $Buffer[$i]) | Out-Null
                 }
