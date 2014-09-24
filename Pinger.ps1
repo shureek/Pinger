@@ -3,10 +3,10 @@
     Пингует указанные компьютеры и отправляет тревожные сообщения на приемник по TCP
 .Notes
     Создал Александр Кузин
-    Версия 1.2 от 14.07.2014
+    Версия 2.0 от 24.09.2014
     Файл подписан цифровой подписью. При малейшем изменении он перестанет запускаться.
 #>
-[CmdletBinding(DefaultParameterSetName='FileName', SupportsShouldProcess=$true)]
+[CmdletBinding(DefaultParameterSetName='Computers', SupportsShouldProcess=$true)]
 param(
     # Адрес приемника в формате <адрес>[:<порт>]
     [Parameter(Position=0)]
@@ -14,16 +14,28 @@ param(
     [string]$SendTo = '10.34.0.25:10030',
     
     # Соответствие компьютеров и номеров зон
-    [Parameter(Mandatory=$true, ParameterSetName='Computers')]
-    [Hashtable]$Computers,
+    [Parameter(ParameterSetName='Computers')]
+    [Hashtable]$Computers = @{MAIN=1;Serv1C=2;'10.34.0.77'=3},
 
     # Имя файла со списком компьютеров и номерами зон
     # Текстовый файл со строками вида:
     #  Server1 = 1
     #  10.34.0.1 = 2
     #  www.yandex.ru = 3
-    [Parameter(ParameterSetName='FileName')]
-    [string]$FileName = 'Ping computers.txt',
+    [Parameter(Mandatory=$true, ParameterSetName='FileName')]
+    [string]$FileName,
+
+    # Задержка между пингами
+    [ValidateRange(1, [Int32]::MaxValue)]
+    [int]$PingDelay = 5,
+
+    # Максимальное количество допустимых ошибок пинга
+    [ValidateRange(0, [Int32]::MaxValue)]
+    [int]$MaxErrors = 9,
+
+    # Время, через которое нужно отправлять тесты (в секундах), 0 — тесты не нужны
+    [ValidateRange(0, [Int32]::MaxValue)]
+    [int]$TestTime = 250,
 
     # Номер приемника
     [Parameter(ValueFromPipelineByPropertyName=$true)]
@@ -72,9 +84,12 @@ function Ping-Computer {
         [Parameter(Mandatory=$true, Position=0)]
         [string[]]$ComputerName,
         # Количество пингов (0 — бесконечно)
-        [int]$Count = 4,
+        [ValidateRange(0, [Int32]::MaxValue)]
+        [int]$Count = 0,
         # Задержка между пингами
-        [int]$Delay = 1
+        [int]$Delay = 5,
+        # Максимальное количество допустимых ошибок пинга
+        [int]$MaxErrors = 9
     )
     
     # Начальные данные для формирования статистики
@@ -88,22 +103,90 @@ function Ping-Computer {
         $CountInt = $Count
     }
 
-    0 | %{
-        do {
-            Test-Connection -ComputerName $ComputerName -Count $CountInt -Delay $Delay -ErrorAction SilentlyContinue -ErrorVariable PingError
-        } while($Count -le 0) # при $Count ≤ 0 будет бесконечный цикл
-    } | %{
-        $_
-        if ($PingError.Count -gt 0) {
-            Write-Output $PingError
-            $PingError.Clear()
+    $Jobs = New-Object System.Collections.Generic.List[object]
+    try {
+        foreach ($CompName in $ComputerName) {
+            $Job = Start-Job -ScriptBlock {
+                param([string]$ComputerName,[int]$Delay,[int]$Count,[int]$MaxErrors,$VerbPref)
+                $VerbosePreference = $VerbPref
+                Write-Verbose "Ping $ComputerName (Delay $Delay, Count $Count) job started"
+                [int]$ErrorsCount = 0
+                $PrevOK = $null
+                $StartTime = Get-Date
+                $StatusChanged = $null
+                for ($i = 0; $i -lt $Count -or $Count -eq 0; $i++) { # при $Count ≤ 0 будет бесконечный цикл
+                    if ($i -gt 0) {
+                        Start-Sleep $Delay
+                    }
+
+                    $Ping = Test-Connection -ComputerName $ComputerName -Delay $Delay -Count 1 -ErrorAction SilentlyContinue -ErrorVariable PingError
+                    if ($PingError.Count -eq 0) {
+                        $OK = $true
+                    }
+                    else {
+                        $OK = $false
+                        $PingError.Clear()
+                    }
+
+                    if ($OK -eq $PrevOK) {
+                        if ($StatusChanged -eq $null) {
+                            $Begin = 'момента запуска'
+                            $Span = (Get-Date) - $StartTime
+                        }
+                        else {
+                            $Begin = '{0}' -f $StatusChanged
+                            $Span = (Get-Date) - $StatusChanged
+                        }
+                        $Span = New-Object TimeSpan -ArgumentList $Span.Days,$Span.Hours,$Span.Minutes,$Span.Seconds
+                        $add = ' с {0} ({1:c})' -f $Begin,$Span
+                    }
+                    else {
+                        if ($StatusChanged -ne $null) {
+                            $StatusChanged = Get-Date
+                        }
+                        $add = ''
+                    }
+
+                    if ($OK) {
+                        Write-Verbose "$ComputerName доступен$add, пинг $($Ping.ResponseTime) мс"
+                        $ErrorsCount = 0
+                        [PSCustomObject]@{Computer=$ComputerName;Status=$OK;Time=$Ping.ResponseTime}
+                    }
+                    else {
+                        Write-Warning "$ComputerName не отвечает$add"
+                        $PingError.Clear()
+                        $ErrorsCount++
+                        if ($ErrorsCount -gt $MaxErrors) {
+                            [PSCustomObject]@{Computer=$ComputerName;Status=$OK}
+                            $ErrorsCount = 0
+                        }
+                    }
+
+                    $PrevOK = $OK
+                }
+            } -ArgumentList $CompName,$Delay,$Count,$MaxErrors,$VerbosePreference
+            [void]$Jobs.Add($Job)
         }
-    } -End {
-        if ($PingError.Count -gt 0) {
-            Write-Output $PingError
-            $PingError.Clear()
+
+        0 | % {
+            do {
+                Start-Sleep $Delay
+                for ($i = $Jobs.Count - 1; $i -ge 0; $i--) {
+                    Receive-Job $Jobs[$i]
+                    if ($Jobs[$i].State -ne 'Running') {
+                        Remove-Job $Jobs[$i]
+                        [void]$Jobs.Remove($i)
+                    }
+                }
+            } while ($Jobs.Count -gt 0)
         }
-    } | %{
+    }
+    finally {
+        Stop-Job $Jobs
+        Remove-Job $Jobs
+    }
+
+    <#%{
         # Формируем объект PingStatus
         if ($_ -is [System.Management.Automation.ErrorRecord]) {
             $PingStatus = [PSCustomObject]@{Computer=$_.TargetObject; Address=$null; Status=$false; Time=$null}
@@ -147,7 +230,7 @@ function Ping-Computer {
         }
 
         $PingStatus
-    }
+    }#>
 }
 
 <#
@@ -296,10 +379,14 @@ if ($PSCmdlet.ParameterSetName -eq 'FileName') {
     }
     $Computers = Get-Content $FullFileName | ?{ $_ -match '(?<Name>[^\s=]+)\s*=\s*(?<Value>\d+)' } | %{ $Hashtable[$Matches.Name] = [int]$Matches.Value } -Begin { $Hashtable = @{} } -End { $Hashtable }
 }
+
+$TestInterval = [TimeSpan]::FromSeconds($TestTime)
+$LastMessage = Get-Date
 Ping-Computer $Computers.Keys -Count 0 -Delay 10 -Verbose | %{
     if ($_.Status) {
-        [PSCustomObject]@{
-            Test = $True
+        if (((Get-Date) - $LastMessage) -gt $TestInterval) {
+            [PSCustomObject]@{ Test = $True }
+            $LastMessage = Get-Date
         }
     }
     else {
@@ -309,5 +396,6 @@ Ping-Computer $Computers.Keys -Count 0 -Delay 10 -Verbose | %{
             Part = $Part;
             Zone = $Computers[$_.Computer];
         }
+        $LastMessage = Get-Date
     }
 } | Send-SurgardMessage -Address $SendTo -Receiver $ReceiverNo -Line $LineNo
